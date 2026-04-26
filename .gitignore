@@ -1,0 +1,16 @@
+.virtualenv 
+.virtualenv/ 
+
+.venv
+.venv/
+
+virtualenv
+virtualenv/
+venv
+
+models/
+dump/
+__pycache__/
+
+.env
+.kilo/

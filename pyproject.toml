@@ -1,0 +1,31 @@
+[project]
+name = "vc-gemini"
+version = "0.1.0"
+description = "Realtime Voice Assistant Service"
+authors = [
+    { name = "Kilo", email = "kilo@example.com" }
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "websockets",
+    "numpy",
+    "soundfile",
+    "torch",
+    "onnxruntime-gpu",
+    "faster-whisper",
+    "google-generativeai",
+    "python-dotenv",
+    "librosa",
+    "pydub",
+    "structlog",
+    "tenacity",
+    "prometheus-client"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
