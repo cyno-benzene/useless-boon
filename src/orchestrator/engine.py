@@ -42,10 +42,13 @@ class PipelineEngine:
         self.transcript_q = asyncio.Queue(maxsize=10)
         self.llm_token_q = asyncio.Queue(maxsize=10)
         self.output_audio_q = asyncio.Queue(maxsize=10)
+        self.user_transcript_q = asyncio.Queue(maxsize=10)
 
         self.tasks: List[asyncio.Task] = []
         self.running = False
         self.turn_start_time = 0
+        self.last_speech_time = 0
+        self.silence_timeout = 0.8 # 800ms silence to trigger end of turn
 
     async def start(self):
         self.running = True
@@ -90,46 +93,81 @@ class PipelineEngine:
                     await emit_event("waveform", {"amplitude": audio[::64].tolist()})
 
                 is_speech = await self.vad_provider.is_speech(audio, 16000)
+                current_time = time.time()
                 
                 if is_speech:
+                    self.last_speech_time = current_time
                     if self.state_manager.state == State.IDLE:
-                        self.turn_start_time = time.time()
+                        self.turn_start_time = current_time
                         await self.state_manager.transition_to(State.LISTENING)
                         await self._update_dashboard_state(State.LISTENING)
                     elif self.state_manager.state == State.SPEAKING:
+                        # BARGE-IN DETECTED
                         self.state_manager.set_barge_in()
+                        # Signal frontend to stop local playback
+                        await emit_event("stop_audio", {})
                         await self.state_manager.transition_to(State.LISTENING)
                         await self._update_dashboard_state(State.LISTENING)
+                        # Clear old transcription and token queues
+                        while not self.transcript_q.empty(): self.transcript_q.get_nowait()
+                        while not self.llm_token_q.empty(): self.llm_token_q.get_nowait()
                     
                     await self.segments_q.put(audio)
                 else:
-                    # Logic for end of speech/silence timeout could go here
-                    pass
+                    # Silence detection: if we were listening and it's been quiet too long, finish the turn
+                    if self.state_manager.state == State.LISTENING:
+                        if current_time - self.last_speech_time > self.silence_timeout:
+                            logger.info("silence_timeout_reached", duration=self.silence_timeout)
+                            # Put a sentinel or just transition
+                            await self.state_manager.transition_to(State.THINKING)
+                            await self._update_dashboard_state(State.THINKING)
+                            # We need to signal STT worker that the user is likely done
+                            await self.segments_q.put(None) 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("vad_worker_error", error=str(e))
 
     async def _stt_worker(self):
-        async def audio_iterator():
-            while self.running:
-                yield await self.segments_q.get()
+        # Local audio buffer for current turn
+        current_turn_audio = []
 
         while self.running:
             try:
-                async for transcript in self.stt_provider.transcribe_stream(audio_iterator()):
-                    logger.debug("stt_partial", transcript=transcript)
+                # We need to process chunks from segments_q
+                audio_chunk = await self.segments_q.get()
+                
+                if audio_chunk is not None:
+                    current_turn_audio.append(audio_chunk)
                     
-                    if self.turn_provider:
-                        is_complete, confidence = await self.turn_provider.is_turn_complete(transcript)
-                        logger.debug("turn_check", is_complete=is_complete, confidence=confidence)
-                    else:
-                        is_complete = True
+                    # If we have enough audio, or it's been a while, we could do partial STT
+                    # But for now, let's wait for the None sentinel (silence timeout)
+                    # or an explicit turn completion from a model.
+                    continue
+                
+                # audio_chunk is None -> Silence timeout or turn end
+                if not current_turn_audio:
+                    continue
+                
+                # Combine audio and transcribe
+                full_audio = np.concatenate(current_turn_audio)
+                current_turn_audio = [] # Reset for next turn
+                
+                # Create a temporary async iterator for the provider
+                async def audio_iter():
+                    yield full_audio
+
+                async for transcript in self.stt_provider.transcribe_stream(audio_iter()):
+                    logger.info("stt_final", transcript=transcript)
+                    await emit_event("stt_final", {"transcript": transcript})
                     
-                    if is_complete:
+                    if self.state_manager.state == State.LISTENING:
                         await self.state_manager.transition_to(State.THINKING)
                         await self._update_dashboard_state(State.THINKING)
-                        await self.transcript_q.put(transcript)
+                    
+                    await self.transcript_q.put(transcript)
+                    await self.user_transcript_q.put(transcript)
+                        
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -141,8 +179,15 @@ class PipelineEngine:
                 transcript = await self.transcript_q.get()
                 logger.info("llm_processing", prompt=transcript)
                 
+                # Clear any lingering barge-in before starting new response
+                self.state_manager.clear_barge_in()
+                
                 messages = [{"role": "user", "content": transcript}]
-                system_prompt = "You are a helpful voice assistant."
+                # Strong instruction for conciseness
+                system_prompt = (
+                    "You are a concise voice assistant. Respond in 1-2 short sentences maximum. "
+                    "Be direct and avoid lists or verbose explanations."
+                )
                 
                 async for token in self.llm_provider.generate_stream(messages, system_prompt):
                     if self.state_manager.barge_in_event.is_set():
@@ -159,8 +204,9 @@ class PipelineEngine:
                 await self.llm_token_q.put(None) 
                 
                 if not self.tts_provider:
-                    await self.state_manager.transition_to(State.IDLE)
-                    await self._update_dashboard_state(State.IDLE)
+                    if not self.state_manager.barge_in_event.is_set():
+                        await self.state_manager.transition_to(State.IDLE)
+                        await self._update_dashboard_state(State.IDLE)
                 
             except asyncio.CancelledError:
                 break
@@ -191,6 +237,11 @@ class PipelineEngine:
                         while not self.output_audio_q.empty():
                             self.output_audio_q.get_nowait()
                         break
+                    
+                    # Emit assistant waveform to dashboard
+                    if len(audio_chunk) > 0:
+                        await emit_event("assistant_waveform", {"amplitude": audio_chunk[::256].tolist()})
+                        
                     await self.output_audio_q.put(audio_chunk)
                 
                 if not self.state_manager.barge_in_event.is_set():

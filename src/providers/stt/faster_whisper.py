@@ -20,29 +20,32 @@ class FasterWhisperSTTProvider(ISTTProvider):
         self.buffer = []
 
     async def transcribe_stream(self, audio_chunks: AsyncIterator[np.ndarray]) -> AsyncIterator[str]:
-        full_audio = []
-        async for chunk in audio_chunks:
-            full_audio.append(chunk)
-            
-            current_audio = np.concatenate(full_audio)
-            if len(current_audio) > 16000 * 2: # 2 seconds
-                try:
-                    segments, info = await asyncio.to_thread(self.model.transcribe, current_audio, beam_size=5)
-                    
+        # Process each chunk immediately. The engine now handles turn-level concatenation.
+        async for current_audio in audio_chunks:
+            if len(current_audio) == 0:
+                continue
+                
+            try:
+                # Use beam_size=1 for faster inference in real-time
+                segments, info = await asyncio.to_thread(
+                    self.model.transcribe, 
+                    current_audio, 
+                    beam_size=1,
+                    language="en", # Hardcode to English to avoid language detection latency
+                    task="transcribe"
+                )
+                
+                text = "".join([s.text for s in segments]).strip()
+                if text:
+                    yield text
+            except Exception as e:
+                logger.error("transcription_error", error=str(e))
+                if "cublas" in str(e).lower() or "cudnn" in str(e).lower():
+                    logger.info("switching_to_cpu_due_to_missing_libs")
+                    self.model = WhisperModel("base", device="cpu", compute_type="int8")
+                    segments, info = await asyncio.to_thread(self.model.transcribe, current_audio, beam_size=1)
                     text = "".join([s.text for s in segments]).strip()
                     if text:
                         yield text
-                        full_audio = []
-                except Exception as e:
-                    logger.error("transcription_error", error=str(e))
-                    if "cublas" in str(e).lower() or "cudnn" in str(e).lower():
-                        logger.info("switching_to_cpu_due_to_missing_libs")
-                        self.model = WhisperModel("base", device="cpu", compute_type="int8")
-                        # Retry the transcription once on CPU
-                        segments, info = await asyncio.to_thread(self.model.transcribe, current_audio, beam_size=5)
-                        text = "".join([s.text for s in segments]).strip()
-                        if text:
-                            yield text
-                            full_audio = []
-                    else:
-                        raise e
+                else:
+                    raise e

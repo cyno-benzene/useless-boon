@@ -29,8 +29,10 @@ class StateManager:
         self._state_changed.set()
         self._state_changed.clear()
 
-        # Reset barge-in event if we transition out of SPEAKING or back to IDLE
-        if new_state != State.SPEAKING:
+        # Only clear barge-in event when starting to listen for a NEW turn 
+        # or when explicitly requested. Don't clear it immediately upon 
+        # transitioning out of SPEAKING to allow workers to see it.
+        if new_state == State.IDLE:
             self._barge_in_event.clear()
 
     def set_barge_in(self):

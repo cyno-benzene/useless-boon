@@ -20,3 +20,5 @@ prometheus-client
 sse-starlette
 reportlab
 vosk
+pocket-tts
+transformers

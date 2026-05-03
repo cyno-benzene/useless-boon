@@ -1,4 +1,5 @@
 import torch
+import os
 from parler_tts import ParlerTTSForConditionalGeneration
 from transformers import AutoTokenizer
 import numpy as np
@@ -10,10 +11,19 @@ logger = structlog.get_logger(__name__)
 
 class ParlerTTSProvider(ITTSProvider):
     def __init__(self, model_name: str = "ai4bharat/indic-parler-tts", device: str = "cuda"):
+        # Auto-detect CUDA availability
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warn("cuda_not_available_for_parler", requested=device)
+            device = "cpu"
+        
         self.device = device
-        self.model = ParlerTTSForConditionalGeneration.from_pretrained(model_name).to(device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.description = "A female speaker with a clear and natural voice." # Placeholder description
+        token = os.getenv("HF_TOKEN")
+        logger.info("initializing_parler_tts", model=model_name, device=device, authenticated=bool(token))
+        
+        # Load model and move to device
+        self.model = ParlerTTSForConditionalGeneration.from_pretrained(model_name, token=token).to(device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
+        self.description = "A female speaker with a clear and natural voice." 
 
     async def synthesize_stream(self, text_chunks: AsyncIterator[str]) -> AsyncIterator[np.ndarray]:
         # Accumulate text until we have a sentence or a significant chunk
@@ -45,5 +55,5 @@ class ParlerTTSProvider(ITTSProvider):
         with torch.no_grad():
             generation = self.model.generate(input_ids=input_ids, prompt_input_ids=prompt_input_ids)
         
-        audio_output = generation.cpu().numpy().squeeze()
+        audio_output = generation.cpu().numpy().squeeze().astype(np.float32)
         return audio_output

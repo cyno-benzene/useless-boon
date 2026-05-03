@@ -29,8 +29,9 @@ class OpenRouterLLMProvider(ILLMProvider):
                 model=self.model_name,
                 messages=full_messages,
                 stream=True,
+                max_tokens=150, # Keep responses concise
                 extra_headers={
-                    "HTTP-Referer": "https://github.com/useless-boon", # Placeholder
+                    "HTTP-Referer": "https://github.com/useless-boon", 
                     "X-OpenRouter-Title": "VC-Gemini Service",
                 }
             )
